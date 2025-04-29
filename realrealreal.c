@@ -8,6 +8,32 @@
 #include <fcntl.h>
 #include <errno.h>
 
+int isBuiltin(char *cmd) {
+    return (strcmp(cmd, "cd") == 0 || strcmp(cmd, "exit") == 0 || strcmp(cmd, "echo") == 0 || strcmp(cmd, "pwd") == 0);
+}
+void execute_builtin(char** argv) {
+    if (strcmp(argv[0], "cd") == 0) {
+        if (argv[1] == NULL) {
+            fprintf(stderr, "cd: missing operand\n");
+        } else {
+            if (chdir(argv[1]) != 0) {
+                perror("cd");
+            }
+        }
+    } else if (strcmp(argv[0], "pwd") == 0) {
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            printf("%s\n", cwd);
+        } else {
+            perror("pwd");
+        }
+    } else if (strcmp(argv[0], "echo") == 0) {
+        for (int i = 1; argv[i] != NULL; i++) {
+            printf("%s ", argv[i]);
+        }
+        printf("\n");
+    }
+}
 void parse_command(char* input, char** argv) {
     int i = 0;
     argv[i] = strtok(input, " ");
@@ -23,7 +49,7 @@ int main() {
 
         char in[256];
         if (fgets(in, sizeof(in), stdin) == NULL) {
-            break;
+            continue;
         }
         in[strcspn(in, "\n")] = 0;
 
@@ -31,7 +57,7 @@ int main() {
             return 0;
         }
 
-        char* cmd[3];
+        char* cmd[3] = { NULL };
         cmd[0] = strtok(in, ",");
         for (int i = 1; i < 3; i++) {
             cmd[i] = strtok(NULL, ",");
@@ -39,8 +65,12 @@ int main() {
                 while (*cmd[i] == ' ') cmd[i]++;
             }
         }
+        int cmd_count = 0;
+        for (int i = 0; i < 3; i++) {
+            if (cmd[i] != NULL) cmd_count++;
+        }
 
-        if (!cmd[0] || !cmd[1] || !cmd[2]) {
+        if (cmd_count != 3) {
             fprintf(stderr, "Usage: command1, command2, outfile (comma separated)\n");
             continue;
         }
@@ -48,74 +78,93 @@ int main() {
         char *outfile = cmd[2];
         char *argv1[64];
         char *argv2[64];
-        char *tmpfile = "tmpfile.txt";
 
         parse_command(cmd[0], argv1);
         parse_command(cmd[1], argv2);
 
-        int fd_out = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        //마지막 파일 여는부분
+        int fd_out = open(outfile, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd_out < 0) {
             perror("open outfile");
-            continue;
-        }
-
-        int fd_tmp = open(tmpfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd_tmp < 0) {
-            perror("open tmpfile");
-            close(fd_out);
             continue;
         }
 
         // After executing 'ls -al /tmp'
         dprintf(fd_out, "After executing '%s'\n", cmd[0]);
 
-        // 1. ls 실행해서 tmpfile에 저장
+        // 명령어 1 빌트인 명령어 검사
+        if (isBuiltin(argv1[0]))
+        {
+            printf("%s: bulitin command", argv1[0])
+            continue;
+        }
+        
+        // 1. ls 실행해서 outfile에 저장
         pid_t pid1 = fork();
         if (pid1 == 0) {
-            dup2(fd_tmp, STDOUT_FILENO); // tmpfile로 저장
-            close(fd_tmp);
+            dup2(fd_out, STDOUT_FILENO); 
+            close(fd_out);
             execvp(argv1[0], argv1);
             perror("execvp cmd1");
             exit(EXIT_FAILURE);
         }
-        close(fd_tmp);
         waitpid(pid1, NULL, 0);
-
-        // 2. tmpfile 읽어서 outfile에 기록
-        int fd_tmp_read = open(tmpfile, O_RDONLY);
-        if (fd_tmp_read < 0) {
-            perror("open tmpfile read");
-            close(fd_out);
-            continue;
+        
+        //2. pid 3으로 파이프로 보내기기
+        int pipe2[2];
+        if (pipe(pipe2) < 0) {
+            perror("pipe error");
+            exit(EXIT_FAILURE);
         }
-
-        char buf[4096];
-        ssize_t n;
-        while ((n = read(fd_tmp_read, buf, sizeof(buf))) > 0) {
-            write(fd_out, buf, n);
+        
+        pid_t pid2 = fork();
+        if (pid2 < 0) {
+            perror("fork pid2");
+            exit(EXIT_FAILURE);
+        }
+        
+        if (pid2 == 0) {
+            close(pipe2[0]);
+            dup2(pipe2[1], STDOUT_FILENO);
+            close(pipe2[1]);
+            execvp(argv1[0], argv1);
+            perror("execvp cmd1");
+            exit(EXIT_FAILURE);
         }
 
         // After executing 'sort -n'
         dprintf(fd_out, "After executing '%s'\n", cmd[1]);
 
         // 3. sort 실행
-        lseek(fd_tmp_read, 0, SEEK_SET); // tmpfile 처음으로 되돌리기
-        pid_t pid2 = fork();
-        if (pid2 == 0) {
-            dup2(fd_tmp_read, STDIN_FILENO);
-            dup2(fd_out, STDOUT_FILENO);
-            close(fd_tmp_read);
-            close(fd_out);
-            execvp(argv2[0], argv2);
-            perror("execvp cmd2");
+        pid_t pid3 = fork();
+        if (pid3 < 0) {
+            perror("fork pid3");
             exit(EXIT_FAILURE);
         }
-        close(fd_tmp_read);
+        
+        if (pid3 == 0) {
+            if (isBuiltin(argv2[0]))
+            {
+                execute_builtin(argv2[0]);
+                exit(EXIT_SUCCESS);
+            }
+            else{
+                close(pipe2[1]);
+                dup2(pipe2[0], STDIN_FILENO);
+                dup2(fd_out, STDOUT_FILENO);
+                close(pipe2[0]);
+                close(fd_out);
+                execvp(argv2[0], argv2);
+                perror("execvp cmd2");
+                exit(EXIT_FAILURE);
+            }
+        }
+        close(pipe2[0]);
+        close(pipe2[1]);
         waitpid(pid2, NULL, 0);
-
+        waitpid(pid3, NULL, 0);
         // Done
         dprintf(fd_out, "Done\n");
         close(fd_out);
-        unlink(tmpfile);
     }
 }
