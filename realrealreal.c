@@ -11,6 +11,7 @@
 int isBuiltin(char *cmd) {
     return (strcmp(cmd, "cd") == 0 || strcmp(cmd, "exit") == 0 || strcmp(cmd, "echo") == 0 || strcmp(cmd, "pwd") == 0);
 }
+
 void execute_builtin(char** argv) {
     if (strcmp(argv[0], "cd") == 0) {
         if (argv[1] == NULL) {
@@ -34,6 +35,7 @@ void execute_builtin(char** argv) {
         printf("\n");
     }
 }
+
 void parse_command(char* input, char** argv) {
     int i = 0;
     argv[i] = strtok(input, " ");
@@ -49,7 +51,8 @@ int main() {
 
         char in[256];
         if (fgets(in, sizeof(in), stdin) == NULL) {
-            continue;
+            printf("\n");
+            break;  // EOF (Ctrl+D)
         }
         in[strcspn(in, "\n")] = 0;
 
@@ -65,6 +68,7 @@ int main() {
                 while (*cmd[i] == ' ') cmd[i]++;
             }
         }
+
         int cmd_count = 0;
         for (int i = 0; i < 3; i++) {
             if (cmd[i] != NULL) cmd_count++;
@@ -82,47 +86,48 @@ int main() {
         parse_command(cmd[0], argv1);
         parse_command(cmd[1], argv2);
 
-        //마지막 파일 여는부분
+        // 파일 열기 (덮어쓰기 모드로 변경)
         int fd_out = open(outfile, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd_out < 0) {
             perror("open outfile");
             continue;
         }
 
-        // After executing 'ls -al /tmp'
+        // After executing 'cmd1'
         dprintf(fd_out, "After executing '%s'\n", cmd[0]);
 
-        // 명령어 1 빌트인 명령어 검사
-        if (isBuiltin(argv1[0]))
-        {
-            printf("%s: bulitin command", argv1[0])
+        if (isBuiltin(argv1[0])) {
+            execute_builtin(argv1);
+            close(fd_out);
             continue;
         }
-        
-        // 1. ls 실행해서 outfile에 저장
+
+        // 1. cmd1 실행해서 outfile에 저장
         pid_t pid1 = fork();
         if (pid1 == 0) {
-            dup2(fd_out, STDOUT_FILENO); 
+            dup2(fd_out, STDOUT_FILENO);
             close(fd_out);
             execvp(argv1[0], argv1);
             perror("execvp cmd1");
             exit(EXIT_FAILURE);
         }
         waitpid(pid1, NULL, 0);
-        
-        //2. pid 3으로 파이프로 보내기기
+
+        // 2. cmd1 실행 -> 파이프로 전달
         int pipe2[2];
         if (pipe(pipe2) < 0) {
             perror("pipe error");
-            exit(EXIT_FAILURE);
+            close(fd_out);
+            continue;
         }
-        
+
         pid_t pid2 = fork();
         if (pid2 < 0) {
             perror("fork pid2");
-            exit(EXIT_FAILURE);
+            close(fd_out);
+            continue;
         }
-        
+
         if (pid2 == 0) {
             close(pipe2[0]);
             dup2(pipe2[1], STDOUT_FILENO);
@@ -132,23 +137,24 @@ int main() {
             exit(EXIT_FAILURE);
         }
 
-        // After executing 'sort -n'
+        // After executing 'cmd2'
         dprintf(fd_out, "After executing '%s'\n", cmd[1]);
 
-        // 3. sort 실행
+        // 3. cmd2 실행 (파이프 입력 받아서 outfile에 저장)
         pid_t pid3 = fork();
         if (pid3 < 0) {
             perror("fork pid3");
-            exit(EXIT_FAILURE);
+            close(pipe2[0]);
+            close(pipe2[1]);
+            close(fd_out);
+            continue;
         }
-        
+
         if (pid3 == 0) {
-            if (isBuiltin(argv2[0]))
-            {
-                execute_builtin(argv2[0]);
+            if (isBuiltin(argv2[0])) {
+                execute_builtin(argv2);
                 exit(EXIT_SUCCESS);
-            }
-            else{
+            } else {
                 close(pipe2[1]);
                 dup2(pipe2[0], STDIN_FILENO);
                 dup2(fd_out, STDOUT_FILENO);
@@ -159,12 +165,15 @@ int main() {
                 exit(EXIT_FAILURE);
             }
         }
+
         close(pipe2[0]);
         close(pipe2[1]);
         waitpid(pid2, NULL, 0);
         waitpid(pid3, NULL, 0);
-        // Done
+
         dprintf(fd_out, "Done\n");
         close(fd_out);
     }
+
+    return 0;
 }
